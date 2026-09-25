@@ -1,6 +1,6 @@
 {
   "name": "@pipeworx/mcp-airnow",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "EPA AirNow MCP — official US real-time AQI + forecast (free key)",
   "type": "module",
   "main": "src/index.ts",
@@ -26,7 +26,7 @@
     "@cloudflare/workers-types": "^4.20260405.1"
   },
   "pipeworx": {
-    "sourceHash": "v1-9d1de08435c7ce503bc5a0eb2f6a39e01936e4ba07d1137f0e3b54c17cc0f121",
-    "sourceCommit": "60f04b68c347e970c6be94a53439d1364061fc06"
+    "sourceHash": "v1-9b4310ed853b517a3b083e2cff6059b39a1ffa1604909e9614cec8f9605c58ce",
+    "sourceCommit": "dca20ba6e13a9aa1c9f2918fc2ddaffe4cc30e5c"
   }
 }
