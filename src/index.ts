@@ -671,57 +671,76 @@ function collapse(s: string): string {
   return s.replace(/\s+/g, ' ').trim();
 }
 /**
- * EPA AirNow MCP — official US real-time AQI + forecast (free key)
+ * EPA AirNow MCP — official US current + forecast AQI, keyless, from AirNow's
+ * public file products (files.airnowtech.org).
  *
  * AirNow is the EPA's authoritative source for current and forecasted air
  * quality at >2,000 US monitoring sites. Complements `airquality` (Open-Meteo
  * gridded forecast), `openaq` (open dataset), and `waqi` (global private
  * stations) with the EPA-official US layer.
  *
- * API: https://docs.airnowapi.org
- * Auth: ?API_KEY= query param. Free tier 500 req/hour.
+ * Source: AirNow RETIRED its keyed web service (www.airnowapi.org/aq/*) on
+ * 2026-10-01 — every call returned HTTP 410 (fleet #2808). The same data is
+ * published keyless as pipe-delimited / CSV files on files.airnowtech.org
+ * (an S3 bucket AirNow refreshes hourly), which this pack reads live per call:
+ *
+ * - airnow/today/cityzipcodes.csv          ZIP → city, state, lat, lon (27k rows)
+ * - airnow/today/reportingarea.dat         per reporting area: yesterday (Y),
+ *                                          current observed (O) and forecast (F)
+ *                                          AQI rows with lat/lon + discussion
+ * - airnow/YYYY/YYYYMMDD/HourlyAQObs_YYYYMMDDHH.dat
+ *                                          per-site hourly AQI + concentrations,
+ *                                          one file per UTC hour, with lat/lon
+ *
+ * Format fact sheets: https://files.airnowtech.org/airnow/docs/
  *
  * Tools:
- * - current_by_zip:     latest AQI for a US ZIP code
- * - current_by_location: latest AQI nearest a lat/lon
- * - forecast_by_zip:    AQI forecast for a US ZIP code on a given date
- * - observations_in_bbox: historical observations inside a bounding box
+ * - current_by_zip:       latest AQI for the reporting area nearest a US ZIP code
+ * - current_by_location:  latest AQI for the reporting area nearest a lat/lon
+ * - forecast_by_zip:      AQI forecast (today + up to 3 days) for a US ZIP code
+ * - observations_in_bbox: hourly site observations inside a bounding box
  */
 
+
+const UA = 'pipeworx-mcp-airnow/2.0 (+https://pipeworx.io)';
+const FILES_BASE = 'https://files.airnowtech.org/airnow';
+const ZIP_URL = `${FILES_BASE}/today/cityzipcodes.csv`;
+const REPORTING_AREA_URL = `${FILES_BASE}/today/reportingarea.dat`;
+const DOCS_URL = 'https://files.airnowtech.org/airnow/docs/';
+const SOURCE_NOTE =
+  'US EPA AirNow public file products (files.airnowtech.org); the keyed AirNow web service was retired 2026-10-01.';
 
 // Bound every fetch() in this pack to a fixed timeout — an upstream that
 // degrades without erroring would otherwise hold the Worker in `await fetch()`
 // until its own execution budget kills the request (minutes, not seconds).
-// Mirrors the epoFetch / usaspending retryFetch pattern (fleet #685).
 async function pwFetch(url: string | URL, init?: RequestInit): Promise<Response> {
-  return fetchWithTimeout(url, init ?? {}, 'EPA AirNow');
+  return fetchWithTimeout(url, { ...(init ?? {}), headers: { 'User-Agent': UA, ...(init?.headers ?? {}) } }, 'EPA AirNow');
 }
-
-const BASE_URL = 'https://www.airnowapi.org/aq';
 
 const tools: McpToolExport['tools'] = [
   {
     name: 'current_by_zip',
     description:
-      'Latest observed AQI for a US ZIP code. Returns one record per pollutant reported at the nearest site (typically O3 + PM2.5). Includes AQI value, category (Good / Moderate / etc.), reporting area, and timestamp.',
+      'Latest observed air quality index (AQI) for the EPA AirNow reporting area nearest a US ZIP code: one row per pollutant (ozone, PM2.5, PM10) with the AQI value, category (Good / Moderate / Unhealthy …), observation hour, reporting agency and yesterday\'s AQI for comparison. Answers "what is the air quality in ZIP 94103 right now".',
     inputSchema: {
       type: 'object',
       properties: {
         zip_code: { type: 'string', description: 'US 5-digit ZIP code' },
-        distance_miles: { type: 'number', description: 'Search radius (default 25, max 250)' },
+        distance_miles: { type: 'number', description: 'Search radius for the nearest reporting area (default 25, max 250)' },
       },
       required: ['zip_code'],
     },
   },
   {
     name: 'current_by_location',
-    description: 'Latest observed AQI for the AirNow station nearest a lat/lon.',
+    description:
+      'Latest observed air quality index (AQI) for the EPA AirNow reporting area nearest a latitude/longitude in the US: one row per pollutant with AQI value, category, observation hour, agency and yesterday\'s AQI. Answers "what is the air quality at these coordinates right now".',
     inputSchema: {
       type: 'object',
       properties: {
         latitude: { type: 'number', description: 'US latitude' },
         longitude: { type: 'number', description: 'US longitude' },
-        distance_miles: { type: 'number', description: 'Search radius (default 25, max 250)' },
+        distance_miles: { type: 'number', description: 'Search radius for the nearest reporting area (default 25, max 250)' },
       },
       required: ['latitude', 'longitude'],
     },
@@ -729,13 +748,13 @@ const tools: McpToolExport['tools'] = [
   {
     name: 'forecast_by_zip',
     description:
-      'AQI forecast for a US ZIP code on a given date (defaults to today). Useful for "is tomorrow ok for outdoor activity" decisions.',
+      'EPA AirNow air quality (AQI) forecast for a US ZIP code — today and up to three days ahead, per pollutant, with the forecast category, Action Day flag and the forecaster\'s discussion text. Pass a date (YYYY-MM-DD) to get one day, omit it for every day AirNow has issued. Answers "is tomorrow ok for outdoor activity in 60601".',
     inputSchema: {
       type: 'object',
       properties: {
         zip_code: { type: 'string', description: 'US 5-digit ZIP code' },
-        date: { type: 'string', description: 'YYYY-MM-DD (default today)' },
-        distance_miles: { type: 'number', description: 'Search radius (default 25)' },
+        date: { type: 'string', description: 'YYYY-MM-DD forecast day (default: every day AirNow has issued, today + up to 3)' },
+        distance_miles: { type: 'number', description: 'Search radius for the nearest reporting area (default 25, max 250)' },
       },
       required: ['zip_code'],
     },
@@ -743,16 +762,16 @@ const tools: McpToolExport['tools'] = [
   {
     name: 'observations_in_bbox',
     description:
-      'Historical AQI observations inside a bounding box for a date range. Specify pollutants as comma-separated parameter codes (e.g., "OZONE,PM25,PM10,CO,NO2,SO2"). bbox format: "minLon,minLat,maxLon,maxLat".',
+      'Hourly EPA AirNow monitoring-site observations inside a bounding box for a span of UTC hours (max 24 hours per call): per site and hour, the AQI for ozone, PM2.5, PM10 and NO2 and the measured concentrations for PM2.5, ozone, NO2, CO, SO2 and PM10. Specify pollutants as comma-separated codes ("OZONE,PM25,PM10,CO,NO2,SO2"). bbox format: "minLon,minLat,maxLon,maxLat"; dates as "YYYY-MM-DDTHH" (UTC). Answers "which monitors in the LA basin exceeded AQI 100 yesterday".',
     inputSchema: {
       type: 'object',
       properties: {
         bbox: { type: 'string', description: 'minLon,minLat,maxLon,maxLat' },
-        start_date: { type: 'string', description: 'YYYY-MM-DDT00 (hour-granular ISO truncated)' },
-        end_date: { type: 'string', description: 'YYYY-MM-DDT23' },
-        parameters: { type: 'string', description: 'Comma-separated pollutants (default: OZONE,PM25,PM10)' },
-        data_type: { type: 'string', description: 'A (AQI) | C (concentration) | B (both, default)' },
-        verbose: { type: 'boolean', description: 'Include site / county / agency / full-AQS-code fields' },
+        start_date: { type: 'string', description: 'YYYY-MM-DDTHH (UTC hour, inclusive)' },
+        end_date: { type: 'string', description: 'YYYY-MM-DDTHH (UTC hour, inclusive; at most 23 hours after start_date)' },
+        parameters: { type: 'string', description: 'Comma-separated pollutants (default: OZONE,PM25,PM10; also NO2,CO,SO2)' },
+        data_type: { type: 'string', description: 'A (AQI only) | C (concentration only) | B (both, default)' },
+        verbose: { type: 'boolean', description: 'Include site status, EPA region, elevation, data source agency and reporting areas' },
       },
       required: ['bbox', 'start_date', 'end_date'],
     },
@@ -760,24 +779,200 @@ const tools: McpToolExport['tools'] = [
 ];
 
 async function callTool(name: string, args: Record<string, unknown>): Promise<unknown> {
-  const apiKey = (args._apiKey as string | undefined)?.trim();
-  if (!apiKey) {
-    throw new Error(
-      'EPA AirNow requires an API key (free 500 req/hour). Contact the operator about platform credentials, or BYO via ?_apiKey=<key> after registering at https://docs.airnowapi.org/account/request/.',
-    );
-  }
   switch (name) {
     case 'current_by_zip':
-      return currentByZip(apiKey, args);
+      return currentByZip(args);
     case 'current_by_location':
-      return currentByLocation(apiKey, args);
+      return currentByLocation(args);
     case 'forecast_by_zip':
-      return forecastByZip(apiKey, args);
+      return forecastByZip(args);
     case 'observations_in_bbox':
-      return observationsInBbox(apiKey, args);
+      return observationsInBbox(args);
     default:
       throw new Error(`Unknown tool: ${name}`);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Fetching + in-isolate caching. The two "today" files are ~1-2 MB each and
+// AirNow rewrites them hourly; a Worker isolate that already parsed one can
+// answer the next question from memory. The gateway's result cache sits in
+// front of this as well (CACHE_TTL_OVERRIDES.airnow).
+// ---------------------------------------------------------------------------
+
+interface CachedText {
+  body: string;
+  lastModified: string | null;
+  fetchedAt: number;
+}
+
+const textCache = new Map<string, CachedText>();
+
+async function loadText(url: string, ttlMs: number): Promise<CachedText> {
+  const hit = textCache.get(url);
+  if (hit && Date.now() - hit.fetchedAt < ttlMs) return hit;
+  const res = await pwFetch(url, { headers: { Accept: 'text/plain, text/csv, */*' } });
+  if (res.status === 404) throw new NotPublished(url);
+  if (!res.ok) {
+    throw new Error(`EPA AirNow file server returned HTTP ${res.status} for ${url.replace(FILES_BASE, 'airnow')}.`);
+  }
+  const body = await res.text();
+  const entry: CachedText = { body, lastModified: toIso(res.headers.get('last-modified')), fetchedAt: Date.now() };
+  textCache.set(url, entry);
+  return entry;
+}
+
+class NotPublished extends Error {
+  constructor(public url: string) {
+    super(`not published: ${url}`);
+  }
+}
+
+function toIso(httpDate: string | null): string | null {
+  if (!httpDate) return null;
+  const t = Date.parse(httpDate);
+  return Number.isNaN(t) ? null : new Date(t).toISOString();
+}
+
+// ---------------------------------------------------------------------------
+// ZIP index — airnow/today/cityzipcodes.csv  (City|State|Zipcode|Latitude|Longitude)
+// ---------------------------------------------------------------------------
+
+interface ZipRow {
+  zip: string;
+  city: string;
+  state: string;
+  lat: number;
+  lon: number;
+}
+
+let zipIndex: { map: Map<string, ZipRow>; lastModified: string | null } | null = null;
+let zipIndexAt = 0;
+const ZIP_TTL_MS = 24 * 3600 * 1000;
+
+async function getZipIndex() {
+  if (zipIndex && Date.now() - zipIndexAt < ZIP_TTL_MS) return zipIndex;
+  const { body, lastModified } = await loadText(ZIP_URL, ZIP_TTL_MS);
+  const map = new Map<string, ZipRow>();
+  for (const line of body.split('\n')) {
+    const f = line.trim().split('|');
+    if (f.length < 5 || f[2] === 'Zipcode') continue;
+    const lat = Number(f[3]);
+    const lon = Number(f[4]);
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
+    map.set(f[2], { zip: f[2], city: f[0], state: f[1], lat, lon });
+  }
+  zipIndex = { map, lastModified };
+  zipIndexAt = Date.now();
+  return zipIndex;
+}
+
+// ---------------------------------------------------------------------------
+// Reporting-area file — airnow/today/reportingarea.dat (pipe-delimited)
+//   issue_date|valid_date|valid_time|tz|day_offset|type|primary|area|state|
+//   lat|lon|parameter|aqi|category|action_day|discussion|agency
+// type: Y = yesterday's observed, O = current observed, F = forecast
+// ---------------------------------------------------------------------------
+
+interface AreaRow {
+  issue_date: string;
+  valid_date: string;
+  valid_time: string;
+  timezone: string;
+  day_offset: number;
+  type: 'Y' | 'O' | 'F';
+  primary: boolean;
+  area: string;
+  state: string;
+  lat: number;
+  lon: number;
+  pollutant: string;
+  aqi: number | null;
+  category: string | null;
+  action_day: boolean;
+  discussion: string | null;
+  agency: string;
+}
+
+interface ReportingArea {
+  key: string;
+  area: string;
+  state: string;
+  lat: number;
+  lon: number;
+  rows: AreaRow[];
+}
+
+let areaIndex: { areas: ReportingArea[]; lastModified: string | null } | null = null;
+let areaIndexAt = 0;
+const AREA_TTL_MS = 10 * 60 * 1000;
+
+async function getReportingAreas() {
+  if (areaIndex && Date.now() - areaIndexAt < AREA_TTL_MS) return areaIndex;
+  const { body, lastModified } = await loadText(REPORTING_AREA_URL, AREA_TTL_MS);
+  const byKey = new Map<string, ReportingArea>();
+  for (const line of body.split('\n')) {
+    const f = line.split('|');
+    if (f.length < 17) continue;
+    const lat = Number(f[9]);
+    const lon = Number(f[10]);
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
+    const type = f[5] as AreaRow['type'];
+    if (type !== 'Y' && type !== 'O' && type !== 'F') continue;
+    const aqi = f[12].trim() === '' ? null : Number(f[12]);
+    const row: AreaRow = {
+      issue_date: mdyToIso(f[0]),
+      valid_date: mdyToIso(f[1]),
+      valid_time: f[2],
+      timezone: f[3],
+      day_offset: Number(f[4]),
+      type,
+      primary: f[6] === 'Y',
+      area: f[7],
+      state: f[8],
+      lat,
+      lon,
+      pollutant: f[11],
+      aqi: aqi !== null && Number.isFinite(aqi) ? aqi : null,
+      category: f[13] || null,
+      action_day: f[14] === 'Yes',
+      discussion: f[15]?.trim() || null,
+      agency: f[16]?.trim() ?? '',
+    };
+    const key = `${row.area}|${row.state}`;
+    let area = byKey.get(key);
+    if (!area) {
+      area = { key, area: row.area, state: row.state, lat, lon, rows: [] };
+      byKey.set(key, area);
+    }
+    area.rows.push(row);
+  }
+  areaIndex = { areas: [...byKey.values()], lastModified };
+  areaIndexAt = Date.now();
+  return areaIndex;
+}
+
+/** "10/07/26" → "2026-10-07" */
+function mdyToIso(s: string): string {
+  const m = /^(\d{2})\/(\d{2})\/(\d{2,4})$/.exec(s.trim());
+  if (!m) return s.trim();
+  const yr = m[3].length === 2 ? `20${m[3]}` : m[3];
+  return `${yr}-${m[1]}-${m[2]}`;
+}
+
+function haversineMiles(lat1: number, lon1: number, lat2: number, lon2: number): number {
+  const R = 3958.8;
+  const toRad = (d: number) => (d * Math.PI) / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a =
+    Math.sin(dLat / 2) ** 2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(a));
+}
+
+function radiusMiles(args: Record<string, unknown>): number {
+  const d = typeof args.distance_miles === 'number' ? args.distance_miles : 25;
+  return Math.min(250, Math.max(0, d));
 }
 
 function reqStr(args: Record<string, unknown>, key: string, example: string): string {
@@ -785,164 +980,365 @@ function reqStr(args: Record<string, unknown>, key: string, example: string): st
   if (typeof v !== 'string' || !v.trim()) {
     throw new Error(`Required argument "${key}" is missing or empty. Pass a string like ${example}.`);
   }
+  return v.trim();
+}
+
+function reqNum(args: Record<string, unknown>, key: string): number {
+  const v = typeof args[key] === 'string' ? Number(args[key]) : args[key];
+  if (typeof v !== 'number' || !Number.isFinite(v)) {
+    throw new Error(`Required argument "${key}" is missing or not a number.`);
+  }
   return v;
 }
 
-async function airnowFetch<T>(path: string, params: URLSearchParams): Promise<T> {
-  const url = `${BASE_URL}${path}?${params}`;
-  const res = await pwFetch(url, { headers: { Accept: 'application/json' } });
-  if (res.status === 401 || res.status === 403) throw new Error('AirNow: unauthorized — check the API key');
-  if (res.status === 429) throw new Error('AirNow: rate-limit (HTTP 429) — free tier is 500/hour');
-  if (!res.ok) {
-    const body = await res.text();
-    throw new Error(`AirNow error: ${res.status} ${body.slice(0, 200)}`);
+/** Reporting areas within `radius` miles of a point, nearest first, that carry at least one row of `type`. */
+async function nearestAreas(lat: number, lon: number, radius: number, type: AreaRow['type']) {
+  const { areas, lastModified } = await getReportingAreas();
+  const ranked = areas
+    .map((a) => ({ area: a, distance_miles: haversineMiles(lat, lon, a.lat, a.lon) }))
+    .filter((x) => x.distance_miles <= radius && x.area.rows.some((r) => r.type === type))
+    .sort((a, b) => a.distance_miles - b.distance_miles);
+  return { ranked, lastModified };
+}
+
+function observationOut(r: AreaRow) {
+  return {
+    pollutant: r.pollutant,
+    aqi: r.aqi,
+    category: r.category,
+    observed_date: r.valid_date,
+    observed_hour: r.valid_time || null,
+    timezone: r.timezone,
+    primary_pollutant: r.primary,
+    agency: r.agency,
+  };
+}
+
+function areaHeader(hit: { area: ReportingArea; distance_miles: number }) {
+  return {
+    reporting_area: hit.area.area,
+    state: hit.area.state,
+    area_latitude: hit.area.lat,
+    area_longitude: hit.area.lon,
+    distance_miles: Math.round(hit.distance_miles * 10) / 10,
+  };
+}
+
+async function currentForPoint(lat: number, lon: number, radius: number) {
+  const { ranked, lastModified } = await nearestAreas(lat, lon, radius, 'O');
+  if (ranked.length === 0) {
+    return {
+      found: false as const,
+      reason: 'no_reporting_area_in_radius',
+      hint: `No EPA AirNow reporting area with a current observation within ${radius} miles of ${lat},${lon}. Raise distance_miles (max 250), or use observations_in_bbox for raw monitor sites, or the openaq / airquality packs for non-AirNow coverage.`,
+      data_as_of: lastModified,
+      source: REPORTING_AREA_URL,
+    };
   }
-  return res.json() as Promise<T>;
-}
-
-interface ObservationRow {
-  DateObserved?: string;
-  HourObserved?: number;
-  LocalTimeZone?: string;
-  ReportingArea?: string;
-  StateCode?: string;
-  Latitude?: number;
-  Longitude?: number;
-  ParameterName?: string;
-  AQI?: number;
-  Category?: { Number?: number; Name?: string };
-}
-
-interface ForecastRow extends ObservationRow {
-  DateForecast?: string;
-  ActionDay?: boolean;
-  Discussion?: string;
-}
-
-function normalizeObservation(o: ObservationRow) {
+  const hit = ranked[0];
+  const current = hit.area.rows.filter((r) => r.type === 'O');
+  const yesterday = hit.area.rows.filter((r) => r.type === 'Y');
   return {
-    date: o.DateObserved?.trim() ?? null,
-    hour: o.HourObserved ?? null,
-    timezone: o.LocalTimeZone ?? null,
-    reporting_area: o.ReportingArea ?? null,
-    state: o.StateCode ?? null,
-    latitude: o.Latitude ?? null,
-    longitude: o.Longitude ?? null,
-    pollutant: o.ParameterName ?? null,
-    aqi: o.AQI ?? null,
-    category: o.Category?.Name ?? null,
-    category_number: o.Category?.Number ?? null,
+    found: true as const,
+    ...areaHeader(hit),
+    count: current.length,
+    observations: current.map(observationOut),
+    yesterday: yesterday.map((r) => ({ pollutant: r.pollutant, aqi: r.aqi, category: r.category, date: r.valid_date })),
+    other_areas_in_radius: ranked.slice(1, 6).map(areaHeader),
+    data_as_of: lastModified,
+    source: REPORTING_AREA_URL,
+    source_note: SOURCE_NOTE,
   };
 }
 
-async function currentByZip(apiKey: string, args: Record<string, unknown>) {
-  const zip = reqStr(args, 'zip_code', '"94103"');
-  const params = new URLSearchParams({
-    format: 'application/json',
-    zipCode: zip,
-    distance: String(Math.min(250, Math.max(0, (args.distance_miles as number) ?? 25))),
-    API_KEY: apiKey,
-  });
-  const data = await airnowFetch<ObservationRow[]>('/observation/zipCode/current/', params);
-  return { zip_code: zip, count: data.length, observations: data.map(normalizeObservation) };
+async function resolveZip(zip: string) {
+  const idx = await getZipIndex();
+  const row = idx.map.get(zip);
+  if (!row) {
+    return {
+      found: false as const,
+      reason: 'zip_not_in_airnow_index',
+      hint: `ZIP ${zip} is not in AirNow's city/ZIP index (${idx.map.size} ZIPs). Geocode it and call current_by_location / forecast_by_zip's sibling with latitude and longitude instead.`,
+      source: ZIP_URL,
+    };
+  }
+  return { found: true as const, ...row };
 }
 
-async function currentByLocation(apiKey: string, args: Record<string, unknown>) {
-  const params = new URLSearchParams({
-    format: 'application/json',
-    latitude: String(args.latitude),
-    longitude: String(args.longitude),
-    distance: String(Math.min(250, Math.max(0, (args.distance_miles as number) ?? 25))),
-    API_KEY: apiKey,
-  });
-  const data = await airnowFetch<ObservationRow[]>('/observation/latLong/current/', params);
-  return {
-    latitude: args.latitude,
-    longitude: args.longitude,
-    count: data.length,
-    observations: data.map(normalizeObservation),
-  };
+async function currentByZip(args: Record<string, unknown>) {
+  const zip = reqStr(args, 'zip_code', '"94103"');
+  const loc = await resolveZip(zip);
+  if (!loc.found) return { zip_code: zip, ...loc };
+  const out = await currentForPoint(loc.lat, loc.lon, radiusMiles(args));
+  return { zip_code: zip, city: loc.city, zip_state: loc.state, ...out };
 }
 
-async function forecastByZip(apiKey: string, args: Record<string, unknown>) {
-  const zip = reqStr(args, 'zip_code', '"94103"');
-  const params = new URLSearchParams({
-    format: 'application/json',
-    zipCode: zip,
-    distance: String(Math.min(250, Math.max(0, (args.distance_miles as number) ?? 25))),
-    API_KEY: apiKey,
-  });
-  if (args.date) params.set('date', String(args.date));
+async function currentByLocation(args: Record<string, unknown>) {
+  const lat = reqNum(args, 'latitude');
+  const lon = reqNum(args, 'longitude');
+  const out = await currentForPoint(lat, lon, radiusMiles(args));
+  return { latitude: lat, longitude: lon, ...out };
+}
 
-  const data = await airnowFetch<ForecastRow[]>('/forecast/zipCode/', params);
+async function forecastByZip(args: Record<string, unknown>) {
+  const zip = reqStr(args, 'zip_code', '"94103"');
+  const wantDate = typeof args.date === 'string' && args.date.trim() ? args.date.trim() : null;
+  if (wantDate && !/^\d{4}-\d{2}-\d{2}$/.test(wantDate)) {
+    throw new Error(`"date" must be YYYY-MM-DD, got "${wantDate}".`);
+  }
+  const loc = await resolveZip(zip);
+  if (!loc.found) return { zip_code: zip, ...loc };
+  const radius = radiusMiles(args);
+  const { ranked, lastModified } = await nearestAreas(loc.lat, loc.lon, radius, 'F');
+  if (ranked.length === 0) {
+    return {
+      zip_code: zip,
+      found: false,
+      reason: 'no_forecast_area_in_radius',
+      hint: `No EPA AirNow reporting area with an issued forecast within ${radius} miles of ZIP ${zip}. Raise distance_miles (max 250) or use the airquality pack (Open-Meteo gridded forecast).`,
+      data_as_of: lastModified,
+      source: REPORTING_AREA_URL,
+    };
+  }
+  const hit = ranked[0];
+  const all = hit.area.rows.filter((r) => r.type === 'F');
+  const rows = wantDate ? all.filter((r) => r.valid_date === wantDate) : all;
+  const available = [...new Set(all.map((r) => r.valid_date))].sort();
+  const discussion = all.find((r) => r.discussion)?.discussion ?? null;
   return {
     zip_code: zip,
-    requested_date: args.date ?? 'today',
-    count: data.length,
-    forecast: data.map((f) => ({
-      forecast_date: f.DateForecast?.trim() ?? null,
-      reporting_area: f.ReportingArea ?? null,
-      state: f.StateCode ?? null,
-      latitude: f.Latitude ?? null,
-      longitude: f.Longitude ?? null,
-      pollutant: f.ParameterName ?? null,
-      aqi: f.AQI ?? null,
-      category: f.Category?.Name ?? null,
-      action_day: f.ActionDay ?? false,
-      discussion: f.Discussion ?? null,
-    })),
+    city: loc.city,
+    zip_state: loc.state,
+    found: rows.length > 0,
+    ...(rows.length === 0
+      ? {
+          reason: 'no_forecast_for_date',
+          hint: `AirNow has issued forecasts for ${hit.area.area}, ${hit.area.state} on ${available.join(', ')} only (today + up to 3 days); pick one of those or omit date.`,
+        }
+      : {}),
+    ...areaHeader(hit),
+    requested_date: wantDate ?? 'all issued days',
+    forecast_days_available: available,
+    count: rows.length,
+    forecast: rows
+      .sort((a, b) => a.valid_date.localeCompare(b.valid_date) || a.pollutant.localeCompare(b.pollutant))
+      .map((r) => ({
+        forecast_date: r.valid_date,
+        issued_date: r.issue_date,
+        pollutant: r.pollutant,
+        aqi: r.aqi,
+        category: r.category,
+        primary_pollutant: r.primary,
+        action_day: r.action_day,
+        agency: r.agency,
+      })),
+    discussion,
+    data_as_of: lastModified,
+    source: REPORTING_AREA_URL,
+    source_note: SOURCE_NOTE,
   };
 }
 
-interface BboxObservation {
-  DateObserved?: string;
-  HourObserved?: number;
-  UTC?: string;
-  Parameter?: string;
-  AQI?: number;
-  Category?: number;
-  SiteName?: string;
-  AgencyName?: string;
-  FullAQSCode?: string;
-  IntlAQSCode?: string;
-  Latitude?: number;
-  Longitude?: number;
-  Value?: number;
-  Unit?: string;
+// ---------------------------------------------------------------------------
+// Hourly site observations — airnow/YYYY/YYYYMMDD/HourlyAQObs_YYYYMMDDHH.dat
+// Quoted CSV with a header row; one file per UTC hour, ~1 MB, ~4,400 sites.
+// ---------------------------------------------------------------------------
+
+const PARAM_ALIASES: Record<string, string> = {
+  OZONE: 'OZONE', O3: 'OZONE', PM25: 'PM25', 'PM2.5': 'PM25', PM10: 'PM10', NO2: 'NO2', CO: 'CO', SO2: 'SO2',
+};
+const AQI_PARAMS = new Set(['OZONE', 'PM25', 'PM10', 'NO2']);
+const MAX_HOURS = 24;
+
+function parseHour(s: string, key: string): Date {
+  const m = /^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}))?/.exec(s.trim());
+  if (!m) throw new Error(`"${key}" must be YYYY-MM-DDTHH (UTC hour), got "${s}".`);
+  const d = new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]), Number(m[4] ?? '0')));
+  if (Number.isNaN(d.getTime())) throw new Error(`"${key}" is not a valid date: "${s}".`);
+  return d;
 }
 
-async function observationsInBbox(apiKey: string, args: Record<string, unknown>) {
-  const params = new URLSearchParams({
-    BBOX: reqStr(args, 'bbox', '"-123.0,37.0,-121.0,38.5"'),
-    startDate: reqStr(args, 'start_date', '"2026-05-01T00"'),
-    endDate: reqStr(args, 'end_date', '"2026-05-01T23"'),
-    parameters: (args.parameters as string) ?? 'OZONE,PM25,PM10',
-    dataType: (args.data_type as string) ?? 'B',
-    format: 'application/json',
-    verbose: args.verbose ? '1' : '0',
-    API_KEY: apiKey,
-  });
+function hourFileUrl(d: Date): string {
+  const y = d.getUTCFullYear();
+  const mo = String(d.getUTCMonth() + 1).padStart(2, '0');
+  const da = String(d.getUTCDate()).padStart(2, '0');
+  const h = String(d.getUTCHours()).padStart(2, '0');
+  return `${FILES_BASE}/${y}/${y}${mo}${da}/HourlyAQObs_${y}${mo}${da}${h}.dat`;
+}
 
-  const data = await airnowFetch<BboxObservation[]>('/data/', params);
-  return {
-    bbox: args.bbox,
-    count: data.length,
-    observations: data.map((o) => ({
-      observed_date: o.DateObserved?.trim() ?? null,
-      hour: o.HourObserved ?? null,
-      utc: o.UTC ?? null,
-      site: o.SiteName ?? null,
-      agency: o.AgencyName ?? null,
-      aqs_code: o.FullAQSCode ?? null,
-      latitude: o.Latitude ?? null,
-      longitude: o.Longitude ?? null,
-      pollutant: o.Parameter ?? null,
-      aqi: o.AQI ?? null,
-      category: o.Category ?? null,
-      value: o.Value ?? null,
-      unit: o.Unit ?? null,
-    })),
+/** Minimal RFC-4180 line parser: every AirNow field is double-quoted; site names may contain commas. */
+function parseCsvLine(line: string): string[] {
+  const out: string[] = [];
+  let cur = '';
+  let inQ = false;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (inQ) {
+      if (c === '"') {
+        if (line[i + 1] === '"') {
+          cur += '"';
+          i++;
+        } else inQ = false;
+      } else cur += c;
+    } else if (c === '"') inQ = true;
+    else if (c === ',') {
+      out.push(cur);
+      cur = '';
+    } else cur += c;
+  }
+  out.push(cur);
+  return out;
+}
+
+const num = (s: string | undefined): number | null => {
+  if (s === undefined || s.trim() === '') return null;
+  const n = Number(s);
+  return Number.isFinite(n) ? n : null;
+};
+
+async function observationsInBbox(args: Record<string, unknown>) {
+  const bboxStr = reqStr(args, 'bbox', '"-123.0,37.0,-121.0,38.5"');
+  const bbox = bboxStr.split(',').map((s) => Number(s.trim()));
+  if (bbox.length !== 4 || bbox.some((n) => !Number.isFinite(n))) {
+    throw new Error(`"bbox" must be "minLon,minLat,maxLon,maxLat", got "${bboxStr}".`);
+  }
+  const [minLon, minLat, maxLon, maxLat] = bbox;
+  const start = parseHour(reqStr(args, 'start_date', '"2026-10-06T00"'), 'start_date');
+  const end = parseHour(reqStr(args, 'end_date', '"2026-10-06T23"'), 'end_date');
+  if (end < start) throw new Error('"end_date" is before "start_date".');
+  const hours = Math.floor((end.getTime() - start.getTime()) / 3_600_000) + 1;
+  if (hours > MAX_HOURS) {
+    throw new Error(
+      `AirNow publishes one ~1 MB file per hour; this span is ${hours} hours and the cap is ${MAX_HOURS} per call. Narrow the range (e.g. one day: 2026-10-06T00 to 2026-10-06T23) and page by day.`,
+    );
+  }
+  const wanted = ((args.parameters as string) ?? 'OZONE,PM25,PM10')
+    .split(',')
+    .map((p) => PARAM_ALIASES[p.trim().toUpperCase()])
+    .filter(Boolean);
+  if (wanted.length === 0) throw new Error('"parameters" named no known pollutant; use OZONE, PM25, PM10, NO2, CO, SO2.');
+  const dataType = String(args.data_type ?? 'B').toUpperCase();
+  if (!['A', 'C', 'B'].includes(dataType)) throw new Error('"data_type" must be A, C or B.');
+  const verbose = Boolean(args.verbose);
+
+  const slots: Date[] = [];
+  for (let i = 0; i < hours; i++) slots.push(new Date(start.getTime() + i * 3_600_000));
+
+  const missing: string[] = [];
+  let latestModified: string | null = null;
+  const observations: Record<string, unknown>[] = [];
+
+  // Fetch in small parallel batches: max() of the batch instead of sum(), without
+  // opening 24 sockets to one S3 bucket at once.
+  const BATCH = 6;
+  for (let i = 0; i < slots.length; i += BATCH) {
+    const batch = slots.slice(i, i + BATCH);
+    const results = await Promise.all(
+      batch.map(async (d) => {
+        try {
+          return { d, file: await loadText(hourFileUrl(d), 6 * 3600 * 1000) };
+        } catch (err) {
+          if (err instanceof NotPublished) return { d, file: null };
+          throw err;
+        }
+      }),
+    );
+    for (const { d, file } of results) {
+      const hourLabel = d.toISOString().slice(0, 13) + ':00Z';
+      if (!file) {
+        missing.push(hourLabel);
+        continue;
+      }
+      if (file.lastModified && (!latestModified || file.lastModified > latestModified)) latestModified = file.lastModified;
+      const lines = file.body.split('\n');
+      const header = parseCsvLine(lines[0]);
+      const col = (name: string) => header.indexOf(name);
+      const iLat = col('Latitude');
+      const iLon = col('Longitude');
+      if (iLat < 0 || iLon < 0) continue;
+      for (let li = 1; li < lines.length; li++) {
+        const line = lines[li];
+        if (!line.trim()) continue;
+        const f = parseCsvLine(line);
+        const lat = num(f[iLat]);
+        const lon = num(f[iLon]);
+        if (lat === null || lon === null) continue;
+        if (lat < minLat || lat > maxLat || lon < minLon || lon > maxLon) continue;
+        const get = (n: string) => f[col(n)];
+        const aqi: Record<string, number | null> = {};
+        const concentration: Record<string, { value: number | null; unit: string | null }> = {};
+        let any = false;
+        for (const p of wanted) {
+          if (dataType !== 'C' && AQI_PARAMS.has(p)) {
+            const v = num(get(`${p}_AQI`));
+            if (v !== null) {
+              aqi[p] = v;
+              any = true;
+            }
+          }
+          if (dataType !== 'A') {
+            const v = num(get(p));
+            if (v !== null) {
+              concentration[p] = { value: v, unit: get(`${p}_Unit`) || null };
+              any = true;
+            }
+          }
+        }
+        if (!any) continue;
+        observations.push({
+          utc: hourLabel,
+          site_id: get('AQSID'),
+          site: get('SiteName'),
+          latitude: lat,
+          longitude: lon,
+          local_date: mdyToIso(get('ValidDate') ?? ''),
+          local_time: get('ValidTime') || null,
+          gmt_offset: num(get('GMTOffset')),
+          ...(dataType !== 'C' ? { aqi } : {}),
+          ...(dataType !== 'A' ? { concentration } : {}),
+          ...(verbose
+            ? {
+                status: get('Status') || null,
+                epa_region: get('EPARegion') || null,
+                elevation_m: num(get('Elevation')),
+                country: get('CountryCode') || null,
+                state: get('StateName') || null,
+                agency: get('DataSource') || null,
+                reporting_areas: (get('ReportingArea_PipeDelimited') ?? '').split('|').filter(Boolean),
+              }
+            : {}),
+        });
+      }
+    }
+  }
+
+  const base = {
+    bbox: bboxStr,
+    start_utc: start.toISOString().slice(0, 13) + ':00Z',
+    end_utc: end.toISOString().slice(0, 13) + ':00Z',
+    hours_requested: hours,
+    hours_published: hours - missing.length,
+    hours_not_yet_published: missing,
+    parameters: wanted,
+    data_type: dataType,
+    data_as_of: latestModified,
+    source: `${FILES_BASE}/YYYY/YYYYMMDD/HourlyAQObs_YYYYMMDDHH.dat (format: ${DOCS_URL}HourlyAQObsFactSheet.pdf)`,
+    source_note: SOURCE_NOTE,
   };
+  if (observations.length === 0) {
+    return {
+      ...base,
+      found: false,
+      reason: missing.length === hours ? 'hours_not_published' : 'no_sites_in_bbox',
+      hint:
+        missing.length === hours
+          ? 'AirNow has not published any of these hourly files yet (the current UTC hour lands ~30-60 min after it ends); ask for an earlier span.'
+          : `No AirNow monitoring site reporting ${wanted.join('/')} inside ${bboxStr} in those hours. Widen the box (AirNow sites are sparse outside metro areas) or try other pollutants.`,
+      count: 0,
+      observations: [],
+    };
+  }
+  return { ...base, found: true, count: observations.length, observations };
 }
 
 export default { tools, callTool, meter: { credits: 1 } } satisfies McpToolExport;

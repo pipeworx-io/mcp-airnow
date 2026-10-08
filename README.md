@@ -1,26 +1,67 @@
 # @pipeworx/airnow
 
-EPA AirNow MCP — official US real-time + forecast AQI.
+US EPA AirNow — official current and forecast air quality index (AQI) for every
+US reporting area, plus hourly per-site monitor observations. Keyless: reads
+AirNow's public file products on `files.airnowtech.org` live per call.
 
-Part of [Pipeworx](https://pipeworx.io) — an MCP gateway connecting AI agents to 1683+ live data sources.
+Part of [Pipeworx](https://pipeworx.io) — an MCP gateway connecting AI agents to 1721+ live data sources. This is an independent, unofficial integration — not affiliated with, endorsed by, or published by the upstream provider.
+
+AirNow **retired its keyed web service (`www.airnowapi.org/aq/*`) on
+2026-10-01**; every call returned HTTP 410 until this pack was moved to the file
+products (fleet #2808). The retired-service notice at
+`docs.airnowapi.org/webservices/retired` redirects to a login page, so the file
+products are the only public route left.
 
 ## Tools
 
-- `current_by_zip(zip_code, distance_miles?)`
-- `current_by_location(latitude, longitude, distance_miles?)`
-- `forecast_by_zip(zip_code, date?, distance_miles?)`
+- `current_by_zip(zip_code, distance_miles?)` — latest observed AQI per
+  pollutant for the reporting area nearest a ZIP, with yesterday's AQI and the
+  other reporting areas inside the radius.
+- `current_by_location(latitude, longitude, distance_miles?)` — same, for a
+  lat/lon.
+- `forecast_by_zip(zip_code, date?, distance_miles?)` — issued forecasts (today
+  + up to 3 days) per pollutant, with Action Day flag and forecaster discussion.
+  Omit `date` for every issued day; `forecast_days_available` lists them.
 - `observations_in_bbox(bbox, start_date, end_date, parameters?, data_type?, verbose?)`
+  — hourly per-site AQI and concentrations inside `minLon,minLat,maxLon,maxLat`
+  for a span of **UTC** hours (`YYYY-MM-DDTHH`), **max 24 hours per call** (one
+  ~1 MB upstream file per hour). Pollutants: `OZONE, PM25, PM10, NO2, CO, SO2`
+  (AQI exists for the first four only).
+
+Every response carries `data_as_of` (the upstream file's `Last-Modified`),
+`source` (the file URL) and `found`. A miss is `{found:false, reason, hint}`:
+`zip_not_in_airnow_index`, `no_reporting_area_in_radius`,
+`no_forecast_area_in_radius`, `no_forecast_for_date`, `hours_not_published`,
+`no_sites_in_bbox`.
 
 ## Auth
 
-- **Platform key:** gateway env `PLATFORM_AIRNOW_KEY`.
-- **BYO:** `?_apiKey=<key>` after registering at https://docs.airnowapi.org/account/request/.
+None. No key, no account.
 
-Free tier: 500 requests/hour per key.
+## Data sources
 
-## Data source
+All under `https://files.airnowtech.org/airnow/` (an S3 bucket AirNow rewrites
+hourly; format fact sheets in `airnow/docs/`):
 
-`https://www.airnowapi.org/aq/` — `?API_KEY=` query param.
+| File | Used by | Refresh |
+|------|---------|---------|
+| `today/cityzipcodes.csv` — ZIP → city, state, lat, lon (27k rows) | `*_by_zip` | daily |
+| `today/reportingarea.dat` — per reporting area: yesterday (`Y`), current observed (`O`), forecast (`F`) rows | `current_*`, `forecast_by_zip` | hourly |
+| `YYYY/YYYYMMDD/HourlyAQObs_YYYYMMDDHH.dat` — per-site AQI + concentrations, one file per UTC hour | `observations_in_bbox` | ~30-60 min after the hour |
+
+Quirks worth knowing:
+
+- Forecasts two or more days out often carry a `category` but a `null` AQI —
+  that is how the agencies issue them, not a parse gap.
+- The current-hour `HourlyAQObs` file does not exist until AirNow publishes it;
+  those hours are listed in `hours_not_yet_published` rather than erroring.
+- "Nearest reporting area" is by great-circle distance to the area's published
+  centroid, so a ZIP on a metro edge may resolve to the neighbouring region
+  (ZIP 10001 → "New York City Region", 10 mi). `other_areas_in_radius` shows the
+  alternatives.
+- The gateway caches `airnow` results for 10 minutes
+  (`CACHE_TTL_OVERRIDES`); the pack also keeps the parsed files in the isolate
+  for 10 min (reporting area) / 24 h (ZIP index) / 6 h (hourly files).
 
 ## Quick Start
 
@@ -66,7 +107,7 @@ directly, instead of just this one's:
 }
 ```
 
-Both URLs reach the same gateway and the same 1683+ data sources. The
+Both URLs reach the same gateway and the same 1721+ data sources. The
 only difference is which pack's tools are listed **directly**; `ask_pipeworx`
 reaches all of them from either one.
 
