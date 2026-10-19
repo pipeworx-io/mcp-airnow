@@ -1,7 +1,7 @@
 {
   "name": "@pipeworx/mcp-airnow",
-  "version": "0.1.3",
-  "description": "EPA AirNow MCP — official US current + forecast AQI, keyless, from AirNow's",
+  "version": "0.1.4",
+  "description": "EPA AirNow MCP — official US current + forecast AQI, keyless, from AirNow's public file products (files.airnowtech.org).",
   "type": "module",
   "main": "src/index.ts",
   "types": "src/index.ts",
@@ -26,7 +26,7 @@
     "@cloudflare/workers-types": "^4.20260405.1"
   },
   "pipeworx": {
-    "sourceHash": "v1-acc9ba07e1a1b1301ec6e55665437b66e20e1160f2c38c143e5751c8d9c9d4ea",
-    "sourceCommit": "29efecb1e77577b1ce49e14f4fd7bbaee3e63885"
+    "sourceHash": "v1-0475fb994d5617938707db6e7d8ba2632bd73c119f44cc8c166261902d9e5da9",
+    "sourceCommit": "351c40908821cfecc9bb2f5849d87bbfdbb26d75"
   }
 }
