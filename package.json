@@ -1,12 +1,20 @@
 {
   "name": "@pipeworx/mcp-airnow",
-  "version": "0.1.5",
+  "version": "0.2.0",
   "description": "EPA AirNow MCP — official US current + forecast AQI, keyless, from AirNow's public file products (files.airnowtech.org).",
   "type": "module",
-  "main": "src/index.ts",
-  "types": "src/index.ts",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./tools.json": "./tools.json",
+    "./package.json": "./package.json"
+  },
   "bin": {
     "mcp-airnow": "bin/cli.js"
+  },
+  "files": ["bin/", "lib/", "tools.json", "server.json"],
+  "engines": {
+    "node": ">=18"
   },
   "keywords": ["mcp", "mcp-server", "model-context-protocol", "pipeworx", "airnow"],
   "license": "MIT",
@@ -14,19 +22,12 @@
     "type": "git",
     "url": "git+https://github.com/pipeworx-io/mcp-airnow.git"
   },
-  "scripts": {
-    "typecheck": "tsc --noEmit"
-  },
-  "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.30.0",
-    "tsx": "^4.19.0"
-  },
-  "devDependencies": {
-    "typescript": "^5.9.3",
-    "@cloudflare/workers-types": "^4.20260405.1"
-  },
+  "mcpName": "io.github.pipeworx-io/airnow",
   "pipeworx": {
-    "sourceHash": "v1-f3c9d596cbc583b39e715228c7ecf26f2740def036e7c90e7672df87d0fa3ea3",
-    "sourceCommit": "71f5325b13bb0ea0de2f0f7207885962ec91a484"
+    "mode": "gateway",
+    "slug": "airnow",
+    "gatewaySlug": "airnow",
+    "sourceHash": "v1-134d91e024d905be87e721bed4b9ab5572f5868b230a0a3e0e396e01755815bf",
+    "sourceCommit": "c6136b81713e72ccb22977ca0c0cd981f8c3f081"
   }
 }
