@@ -3,7 +3,7 @@
   "name": "io.github.pipeworx-io/airnow",
   "title": "Airnow",
   "description": "EPA AirNow MCP — official US current + forecast AQI, keyless, from AirNow's public file products…",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "websiteUrl": "https://pipeworx.io/packs/airnow",
   "repository": {
     "url": "https://github.com/pipeworx-io/mcp-airnow",
